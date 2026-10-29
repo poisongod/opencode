@@ -1,0 +1,96 @@
+diff --git a/packages/native/build.zig b/packages/native/build.zig
+index c2d5b1e..bb2972b 100644
+--- a/packages/native/build.zig
++++ b/packages/native/build.zig
+@@ -366,9 +366,12 @@ fn addNativeAudioDependencies(
+     switch (target.result.os.tag) {
+         .macos => addMacOSSystemLibraries(b, module, macos_sdk_path.?),
+         .linux => {
+-            module.linkSystemLibrary("dl", .{});
+-            module.linkSystemLibrary("pthread", .{});
+-            module.linkSystemLibrary("m", .{});
++            if (!target.result.abi.isAndroid()) {
++                // bionic libc already contains dl/pthread/m
++                module.linkSystemLibrary("dl", .{});
++                module.linkSystemLibrary("pthread", .{});
++                module.linkSystemLibrary("m", .{});
++            }
+         },
+         else => {},
+     }
+@@ -404,17 +407,32 @@ fn ghosttyVtAvailable(target: std.Build.ResolvedTarget) bool {
+     };
+ }
+ 
++fn addAndroidCMacros(translate: *std.Build.Step.TranslateC) void {
++    translate.defineCMacro("__ANDROID_API__", "24");
++    translate.defineCMacro("__ANDROID_MIN_SDK_VERSION__", "24");
++    // Bionic headers annotate array parameters with Clang nullability.
++    translate.defineCMacro("_Nullable", "");
++    translate.defineCMacro("_Nonnull", "");
++    translate.defineCMacro("_Null_unspecified", "");
++    translate.defineCMacro("_Nullable_result", "");
++}
++
+ fn addTranslatedCImports(
+     b: *std.Build,
+     module: *std.Build.Module,
+     optimize: std.builtin.OptimizeMode,
+     target: std.Build.ResolvedTarget,
+ ) void {
++    const bionic_inc = b.graph.environ_map.get("BIONIC_SYSROOT_INC");
++    const bionic_arch_inc = b.graph.environ_map.get("BIONIC_ARCH_INC");
+     const miniaudio_translate = b.addTranslateC(.{
+         .root_source_file = b.path("src/vendor/miniaudio/miniaudio.h"),
+         .target = target,
+         .optimize = optimize,
+     });
++    if (bionic_inc) |inc| miniaudio_translate.addIncludePath(.{ .cwd_relative = inc });
++    if (bionic_arch_inc) |inc| miniaudio_translate.addIncludePath(.{ .cwd_relative = inc });
++    if (target.result.abi.isAndroid()) addAndroidCMacros(miniaudio_translate);
+     miniaudio_translate.addIncludePath(b.path("src"));
+     module.addImport("miniaudio", miniaudio_translate.createModule());
+ 
+@@ -424,9 +442,12 @@ fn addTranslatedCImports(
+         .target = target,
+         .optimize = optimize,
+     });
++    if (bionic_inc) |inc| yoga_translate.addIncludePath(.{ .cwd_relative = inc });
++    if (bionic_arch_inc) |inc| yoga_translate.addIncludePath(.{ .cwd_relative = inc });
++    if (target.result.abi.isAndroid()) addAndroidCMacros(yoga_translate);
+     yoga_translate.addIncludePath(yoga_dep.path(""));
+     module.addImport("yoga", yoga_translate.createModule());
+-    addContextABIHeader(b, module, optimize, target);
++    addContextABIHeader(b, module, optimize, target, bionic_inc, bionic_arch_inc);
+ }
+ 
+ fn addContextABIHeader(
+@@ -434,12 +455,17 @@ fn addContextABIHeader(
+     module: *std.Build.Module,
+     optimize: std.builtin.OptimizeMode,
+     target: std.Build.ResolvedTarget,
++    bionic_inc: ?[]const u8,
++    bionic_arch_inc: ?[]const u8,
+ ) void {
+     const header = b.addTranslateC(.{
+         .root_source_file = b.path("include/opentui.h"),
+         .target = target,
+         .optimize = optimize,
+     });
++    if (bionic_inc) |inc| header.addIncludePath(.{ .cwd_relative = inc });
++    if (bionic_arch_inc) |inc| header.addIncludePath(.{ .cwd_relative = inc });
++    if (target.result.abi.isAndroid()) addAndroidCMacros(header);
+     module.addImport("context_abi_c", header.createModule());
+ }
+ 
+@@ -899,6 +925,10 @@ fn createLibraries(
+         .root_module = module,
+         .linkage = .static,
+     });
++    if (target.result.abi.isAndroid()) {
++        shared.setLibCFile(b.path("android-libc.conf"));
++        static.setLibCFile(b.path("android-libc.conf"));
++    }
+     shared.installHeader(b.path("include/opentui.h"), "opentui.h");
+     static.installHeader(b.path("include/opentui.h"), "opentui.h");
+     return .{ shared, static };

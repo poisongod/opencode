@@ -1,0 +1,143 @@
+name: android-v2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - android-v2.2.0
+
+concurrency:
+  group: android-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      BUN_VERSION: 1.4.4
+      ZIG_VERSION: 0.16.0
+      NDK_VERSION: 28.2.13676358
+      ANDROID_API: "24"
+      OPENCODE_TARGET: linux-arm64-android
+      BUN_COMPILE_RELEASE: bun-v1.4.4
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install Zig
+        run: |
+          set -euxo pipefail
+          url=$(curl -fsSL https://ziglang.org/download/index.json | jq -r --arg v "$ZIG_VERSION" '.[$v]["x86_64-linux"].tarball')
+          test -n "$url"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/zig.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/zig/zig" version
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;28.2.13676358"
+          accept-android-sdk-licenses: true
+
+      - name: Configure NDK
+        run: |
+          set -euxo pipefail
+          sdk=${ANDROID_HOME:-$ANDROID_SDK_ROOT}
+          ndk="$sdk/ndk/$NDK_VERSION"
+          test -d "$ndk"
+          echo "NDK=$ndk" >> "$GITHUB_ENV"
+
+      - name: Fetch OpenTUI
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch v0.7.0 https://github.com/anomalyco/opentui.git "$RUNNER_TEMP/opentui"
+          git -C "$RUNNER_TEMP/opentui" apply "$GITHUB_WORKSPACE/ci/opentui-0.7.0-android.patch"
+
+      - name: Build OpenTUI
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP/opentui/packages/native"
+          ./scripts/prepare-zig-deps.sh
+
+          sysroot="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          arch_inc="$sysroot/usr/include/aarch64-linux-android"
+          test -d "$arch_inc" || arch_inc="$sysroot/usr/include"
+
+          # Zig needs CRT objects, the bionic stubs and libc++ in one directory.
+          libs="$RUNNER_TEMP/android-libs"
+          rm -rf "$libs"
+          mkdir -p "$libs"
+          cp -a "$sysroot/usr/lib/aarch64-linux-android/$ANDROID_API/." "$libs/"
+          for f in libc++_shared.so libc++_shared.a; do
+            if [ -e "$sysroot/usr/lib/aarch64-linux-android/$f" ]; then
+              cp -a "$sysroot/usr/lib/aarch64-linux-android/$f" "$libs/"
+            fi
+          done
+
+          cat > android-libc.conf <<EOF
+          include_dir=$sysroot/usr/include
+          sys_include_dir=$arch_inc
+          crt_dir=$libs
+          msvc_lib_dir=
+          kernel32_lib_dir=
+          gcc_dir=
+          EOF
+
+          BIONIC_SYSROOT_INC="$sysroot/usr/include" \
+          BIONIC_ARCH_INC="$arch_inc" \
+          zig build -j2 -Dlibrary-target=aarch64-linux-android.$ANDROID_API \
+            -Doptimize=ReleaseSafe build-aarch64-linux-android.$ANDROID_API
+
+      - name: Install dependencies
+        run: bun install --ignore-scripts --os="*" --cpu="*" --libc="*"
+
+      - name: Patch OpenTUI platform target
+        run: |
+          set -euxo pipefail
+          files=$(grep -rl 'platform: process.platform,' node_modules/.bun/@opentui+core@*/node_modules/@opentui/core/chunk-*.js)
+          test -n "$files"
+          sed -i 's/platform: process\.platform,/platform: process.platform === "android" ? "linux" : process.platform,/' $files
+          grep -q 'process.platform === "android" ? "linux"' $files
+
+      - name: Build OpenCode
+        run: |
+          set -euxo pipefail
+          cd packages/cli
+          bun run script/build.ts --skip-web-ui --skip-install --outdir="$GITHUB_WORKSPACE/dist/android"
+
+      - name: Package
+        run: |
+          set -euxo pipefail
+          pkg="$GITHUB_WORKSPACE/pkg"
+          rm -rf "$pkg"
+          mkdir -p "$pkg/bin" "$pkg/libexec/opencode2/otui/@opentui/core-linux-arm64"
+
+          cp "$GITHUB_WORKSPACE/dist/android/cli-linux-arm64-android/bin/opencode" \
+            "$pkg/libexec/opencode2/opencode2.bin"
+          cp "$GITHUB_WORKSPACE/ci/opencode2-wrapper.sh" "$pkg/bin/opencode2"
+          chmod +x "$pkg/bin/opencode2" "$pkg/libexec/opencode2/opencode2.bin"
+
+          lib=$(find "$RUNNER_TEMP/opentui" -type f -path '*/lib/aarch64-linux-android.*/libopentui.so' | head -n1)
+          test -n "$lib"
+          cp "$lib" "$pkg/libexec/opencode2/otui/@opentui/core-linux-arm64/libopentui.so"
+
+          file "$pkg/libexec/opencode2/opencode2.bin"
+          file "$pkg/libexec/opencode2/otui/@opentui/core-linux-arm64/libopentui.so"
+          readelf -d "$pkg/libexec/opencode2/otui/@opentui/core-linux-arm64/libopentui.so" | grep NEEDED || true
+
+          (cd "$pkg" && zip -r9 "$GITHUB_WORKSPACE/opencode2-android-aarch64.zip" .)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode2-android-aarch64
+          path: opencode2-android-aarch64.zip
+          if-no-files-found: error

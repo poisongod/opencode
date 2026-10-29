@@ -40,7 +40,7 @@ const modelsSnapshot = modelsSnapshotPlugin(await bundledModelsSnapshot())
 const allTargets: {
   os: string
   arch: "arm64" | "x64"
-  abi?: "musl"
+  abi?: "musl" | "android"
   avx2?: false
 }[] = [
   { os: "linux", arch: "arm64" },
@@ -49,6 +49,7 @@ const allTargets: {
   { os: "linux", arch: "arm64", abi: "musl" },
   { os: "linux", arch: "x64", abi: "musl" },
   { os: "linux", arch: "x64", abi: "musl", avx2: false },
+  { os: "linux", arch: "arm64", abi: "android" },
   { os: "darwin", arch: "arm64" },
   { os: "darwin", arch: "x64" },
   { os: "darwin", arch: "x64", avx2: false },
@@ -116,11 +117,14 @@ const pluginRuntimePlugin: BunPlugin = {
 }
 
 for (const item of targets) {
-  const opencodePty = await resolveOpencodePty({
-    platform: item.os,
-    arch: item.arch,
-    ...(item.os === "linux" ? { libc: item.abi ?? "glibc" } : {}),
-  })
+  const opencodePty =
+    item.abi === "android"
+      ? undefined
+      : await resolveOpencodePty({
+          platform: item.os,
+          arch: item.arch,
+          ...(item.os === "linux" ? { libc: item.abi ?? "glibc" } : {}),
+        })
   const opencodePtyPlugin: BunPlugin = {
     name: "opencode-pty-binary",
     setup(build) {
@@ -143,7 +147,10 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
       )
     },
   }
-  const parcelWatcherPackage = `@parcel/watcher-${item.os}-${item.arch}${item.os === "linux" ? `-${item.abi ?? "glibc"}` : ""}`
+  const parcelWatcherPackage =
+    item.abi === "android"
+      ? `@parcel/watcher-android-${item.arch}`
+      : `@parcel/watcher-${item.os}-${item.arch}${item.os === "linux" ? `-${item.abi ?? "glibc"}` : ""}`
   const parcelWatcherPlugin: BunPlugin = {
     name: "parcel-watcher-binding",
     setup(build) {
@@ -201,7 +208,9 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "undefined",
       // FFF_LIBC selects the fff native lib variant: "musl" or "gnu".
       FFF_LIBC: item.os === "linux" ? `'${item.abi ?? "gnu"}'` : "undefined",
-      ...(item.os === "linux" ? { "process.env.OPENTUI_LIBC": JSON.stringify(item.abi ?? "glibc") } : {}),
+      ...(item.os === "linux"
+        ? { "process.env.OPENTUI_LIBC": JSON.stringify(item.abi === "android" ? "glibc" : (item.abi ?? "glibc")) }
+        : {}),
     },
   })
 
