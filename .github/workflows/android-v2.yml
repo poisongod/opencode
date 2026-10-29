@@ -23,6 +23,8 @@ jobs:
       NDK_VERSION: 28.2.13676358
       ANDROID_API: "24"
       OPENCODE_TARGET: linux-arm64-android
+      OPENCODE_VERSION: "2.2.0"
+      OPENCODE_CHANNEL: "android"
       BUN_COMPILE_RELEASE: bun-v1.4.4
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -99,6 +101,16 @@ jobs:
 
       - name: Install dependencies
         run: bun install --ignore-scripts --os="*" --cpu="*" --libc="*"
+
+      - name: Link Android watcher binding
+        run: |
+          set -euxo pipefail
+          watcher=$(find node_modules/.bun -type d \
+            -path '*@parcel+watcher-android-arm64*/node_modules/@parcel/watcher-android-arm64' | head -n1)
+          test -n "$watcher"
+          mkdir -p node_modules/@parcel
+          ln -sfn "$(realpath --relative-to=node_modules/@parcel "$watcher")" \
+            node_modules/@parcel/watcher-android-arm64
 
       - name: Patch OpenTUI platform target
         run: |
